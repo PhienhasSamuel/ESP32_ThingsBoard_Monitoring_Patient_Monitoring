@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 
+// OLED display configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
@@ -18,30 +19,31 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 #define LED_PIN 2
 #define BUZZER_PIN 13
 
-// Sensor objects
+// Sensor and MQTT objects
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_MPU6050 mpu;
 
-// Wi-Fi & MQTT
 const char* ssid = "Wokwi-GUEST";
 const char* password = "";
 const char* mqttServer = "demo.thingsboard.io";
 const int mqttPort = 1883;
-const char* token = "4TCQ2h0zijCm5TMKZS7K"; // Replace with your device token
+const char* token = "4TCQ2h0zijCm5TMKZS7K";  // ThingsBoard device token
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Movement detection
+// Movement detection variables
 unsigned long lastMovementTime = 0;
 const unsigned long movementTimeout = 15000;  // 15 seconds
-static float lastAcc = 9.8; // Initialize to gravity
+static float lastAcc = 9.8;  // Approximate gravity baseline
 
+// Connect to Wi-Fi
 void setupWiFi() {
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) delay(500);
 }
 
+// Connect to MQTT broker
 void reconnectMQTT() {
   while (!client.connected()) {
     if (client.connect("ESP32Client", token, "")) break;
@@ -51,15 +53,17 @@ void reconnectMQTT() {
 
 void setup() {
   Serial.begin(115200);
-  dht.begin();
-  mpu.begin();
+
+  dht.begin();         // Initialize temperature sensor
+  mpu.begin();         // Initialize MPU6050 motion sensor
+  Wire.begin();        // I2C communication for OLED and MPU
+
   pinMode(PULSE_PIN, INPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  Wire.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // Initialize OLED
   display.clearDisplay();
 
   setupWiFi();
@@ -70,38 +74,41 @@ void loop() {
   if (!client.connected()) reconnectMQTT();
   client.loop();
 
-  // Read sensor data
+  // Read temperature and humidity
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
 
+  // Simulated pulse value (adjusted to 20–130 BPM range)
   int pulseRaw = analogRead(PULSE_PIN);
-  int pulse = map(pulseRaw, 0, 4095, 20, 130);  // Updated range 20–130 BPM
+  int pulse = map(pulseRaw, 0, 4095, 20, 130);
 
+  // Read motion data
   sensors_event_t a, g, tempSensor;
   mpu.getEvent(&a, &g, &tempSensor);
 
-  // Calculate total acceleration magnitude
+  // Calculate total acceleration (vector magnitude)
   float acc = sqrt(
     a.acceleration.x * a.acceleration.x +
     a.acceleration.y * a.acceleration.y +
     a.acceleration.z * a.acceleration.z
   );
 
-  // Detect real movement (not jitter)
-  if (abs(acc - lastAcc) > 1.0) {  // 1.0 m/s² threshold
+  // Detect real movement based on acceleration change
+  if (abs(acc - lastAcc) > 1.0) {
     lastMovementTime = millis();
   }
   lastAcc = acc;
 
+  // Set movement flag: 1 if recent movement, else 0
   int movement = (millis() - lastMovementTime > movementTimeout) ? 0 : 1;
 
-  // Panic button check
+  // Check if panic button is pressed
   int panicalert = digitalRead(BUTTON_PIN) == LOW ? 1 : 0;
 
-  // Alert condition
+  // Check alert condition: abnormal vitals or no movement or panic
   int alert = (temperature > 38 || pulse < 50 || pulse > 120 || movement == 1 || panicalert == 1) ? 1 : 0;
 
-  // Alert indicators
+  // Trigger buzzer and LED alert
   if (alert) {
     digitalWrite(LED_PIN, HIGH);
     digitalWrite(BUZZER_PIN, HIGH);
@@ -113,7 +120,7 @@ void loop() {
     digitalWrite(BUZZER_PIN, LOW);
   }
 
-  // OLED Display
+  // Display data on OLED
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -125,7 +132,7 @@ void loop() {
   display.printf("Alert: %s\n", alert == 1 ? "YES" : "NO");
   display.display();
 
-  // MQTT Payload for ThingsBoard
+  // Create MQTT JSON payload
   String payload = "{";
   payload += "\"temperature\":" + String(temperature) + ",";
   payload += "\"pulse\":" + String(pulse) + ",";
@@ -134,9 +141,10 @@ void loop() {
   payload += "\"alert\":" + String(alert);
   payload += "}";
 
+  // Send data to ThingsBoard
   client.publish("v1/devices/me/telemetry", payload.c_str());
 
-  // Debug (optional)
+  // Debug info in serial monitor
   Serial.print("Acc: ");
   Serial.print(acc);
   Serial.print(" | Movement: ");
